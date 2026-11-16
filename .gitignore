@@ -1,0 +1,9 @@
+.venv/
+build/
+dist/
+compartilhar/
+build_assets/bin/
+build_assets/icon.iconset/
+*.spec
+__pycache__/
+.claude/
