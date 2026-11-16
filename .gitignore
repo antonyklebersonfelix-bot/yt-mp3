@@ -7,3 +7,4 @@ build_assets/icon.iconset/
 *.spec
 __pycache__/
 .claude/
+.DS_Store
