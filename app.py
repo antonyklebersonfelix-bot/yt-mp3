@@ -167,15 +167,17 @@ def run_spotify_track(job_id, track, quality):
             update(job_id, status="pronto", progress=100, file=final.name + " (já existia)")
             return
         update(job_id, status="procurando no YouTube")
+        search_page = recognize.links(track["title"], track["artist"].split(",")[0])["youtube"]
         try:
-            url = spotify.find_on_youtube(track, str(YTDLP), str(DENO))
+            url, warn = spotify.find_on_youtube(track, str(YTDLP), str(DENO))
         except Exception as e:  # noqa: BLE001
-            update(job_id, status="erro", error=f"Erro na busca: {e}")
+            update(job_id, status="erro", error=str(e), search=search_page)
             return
         if not url:
-            update(job_id, status="erro", error="Não achei essa música no YouTube.")
+            update(job_id, status="erro", search=search_page,
+                   error="Não achei essa música no YouTube. Procure e cole o link do vídeo aqui em cima.")
             return
-        update(job_id, url=url, status="baixando")
+        update(job_id, url=url, status="baixando", warn=warn)
         with tempfile.TemporaryDirectory(prefix="ytmp3-sp-") as tmpdir:
             tmp = Path(tmpdir)
             cmd = ytdlp_cmd(url, quality, str(tmp / "audio.%(ext)s"), thumbnail=False) + ["--no-playlist"]

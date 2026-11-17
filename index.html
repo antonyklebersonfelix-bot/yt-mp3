@@ -38,6 +38,7 @@
   .title { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .meta { font-size:13px; color:var(--muted); display:flex; justify-content:space-between; gap:8px; }
   .err { color:var(--accent); } .done { color:var(--ok); }
+  .warn { color:#c27c0e; } button.mini { font-size:12px; padding:2px 8px; margin-left:6px; }
   .bar { height:5px; background:var(--line); border-radius:3px; margin-top:6px; overflow:hidden; }
   .bar > div { height:100%; background:var(--accent); transition:width .3s; }
   .bar.done > div { background:var(--ok); }
@@ -238,8 +239,8 @@ async function refresh() {
     $("#jobs").innerHTML = !jobs.length ? '<div class="empty">Nenhum download ainda.</div>' :
       jobs.slice().reverse().map(j => {
         const done = j.status === "pronto", err = j.status === "erro";
-        const right = err ? `<span class="err">${esc(j.error)}</span>`
-                    : done ? `<span class="done">✓ ${esc(j.file || "salvo")}</span>`
+        const right = err ? `<span class="err">${esc(j.error)}</span>${j.search ? ` <button class="mini" data-open="${esc(j.search)}">Procurar no YouTube</button>` : ""}`
+                    : done ? `<span class="done">✓ ${esc(j.file || "salvo")}</span>${j.warn ? `<span class="warn"> · ⚠ ${esc(j.warn)}</span>` : ""}`
                     : `${esc(j.status)} · ${Math.round(j.progress)}%`;
         const title = j.title.startsWith("ytsearch1:") ? j.title.slice(10) : j.title;
         return `<div class="job"><div class="title" title="${esc(j.url)}">${esc(title)}</div>

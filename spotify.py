@@ -5,6 +5,7 @@ O áudio NÃO vem do Spotify (é protegido); só os dados da música vêm de lá
 import json
 import re
 import subprocess
+import time
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/18.0 Safari/605.1.15")
@@ -93,15 +94,69 @@ def _score(c, track):
     return s
 
 
+class SearchFailed(RuntimeError):
+    pass
+
+
+def simplify_title(title):
+    """Tira 'Remastered 2011', '(feat. X)', '- Radio Edit' etc. para a busca."""
+    t = re.sub(r"\s*[\(\[](?:feat|ft|with|com)\.?\s[^\)\]]*[\)\]]", "", title, flags=re.I)
+    t = re.sub(r"\s+-\s+(?:\d{4}\s+)?(?:remaster(?:ed)?|radio edit|single version|mono|stereo)\b.*$", "", t, flags=re.I)
+    return t.strip() or title
+
+
+def _search(query, ytdlp, deno, n=8):
+    """Busca no YouTube, tentando de novo se o YouTube recusar/demorar."""
+    last = ""
+    for attempt in range(3):
+        try:
+            out = subprocess.run(
+                [ytdlp, f"ytsearch{n}:{query}", "--flat-playlist", "--no-colors", "--js-runtimes", f"deno:{deno}",
+                 "--print", "%(id)s\t%(duration)s\t%(channel)s\t%(title)s"],
+                capture_output=True, text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            last = "o YouTube demorou demais para responder"
+        else:
+            if out.stdout.strip():
+                return out.stdout
+            if out.returncode == 0:
+                return ""  # busca funcionou, só não teve resultado
+            last = next((l for l in reversed(out.stderr.splitlines()) if "ERROR" in l), "erro na busca")
+        time.sleep(3 * (attempt + 1))
+    raise SearchFailed(f"A busca no YouTube falhou ({last}). Tente de novo daqui a pouco.")
+
+
 def find_on_youtube(track, ytdlp, deno):
+    """Retorna (url, aviso). Lança SearchFailed se o YouTube não respondeu."""
     first_artist = track["artist"].split(",")[0].strip()
-    query = f'{first_artist} - {track["title"]}'
-    out = subprocess.run(
-        [ytdlp, f"ytsearch8:{query}", "--flat-playlist", "--no-colors", "--js-runtimes", f"deno:{deno}",
-         "--print", "%(id)s\t%(duration)s\t%(channel)s\t%(title)s"],
-        capture_output=True, text=True, timeout=120)
+    title = simplify_title(track["title"])
+    cands = {}
+    for query in (f"{first_artist} - {title}", f"{title} {first_artist} audio"):
+        for c in _parse(_search(query, ytdlp, deno)):
+            cands.setdefault(c["id"], c)
+        best = max(cands.values(), key=lambda c: _score(c, track), default=None)
+        if best and _score(best, track) > 0:
+            break
+    if not best:
+        return None, None
+    warn = None
+    if _score(best, track) <= -100:
+        # nada com duração parecida: baixa o mais próximo, mas avisa
+        best = min(cands.values(), key=lambda c: abs(c["duration"] - track["duration"]) if c["duration"] else 1e9)
+        if not best["duration"] or abs(best["duration"] - track["duration"]) > track["duration"] * 0.5:
+            return None, None
+        warn = f"versão com duração diferente ({_mmss(best['duration'])} no YouTube, {_mmss(track['duration'])} no Spotify)"
+    return f"https://www.youtube.com/watch?v={best['id']}", warn
+
+
+def _mmss(s):
+    s = int(s or 0)
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _parse(stdout):
     cands = []
-    for line in out.stdout.splitlines():
+    for line in stdout.splitlines():
         parts = line.split("\t", 3)
         if len(parts) < 4:
             continue
@@ -111,9 +166,4 @@ def find_on_youtube(track, ytdlp, deno):
         except ValueError:
             dur = 0
         cands.append({"id": vid, "duration": dur, "channel": channel if channel != "NA" else "", "title": title})
-    if not cands:
-        return None
-    best = max(cands, key=lambda c: _score(c, track))
-    if _score(best, track) <= -100:
-        return None
-    return f"https://www.youtube.com/watch?v={best['id']}"
+    return cands
