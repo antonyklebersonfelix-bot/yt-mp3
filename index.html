@@ -82,16 +82,16 @@
 
   <!-- BAIXAR -->
   <section class="panel on" id="tab-dl">
-    <p class="sub">Cole um ou mais links de vídeos (YouTube, Instagram…), um por linha.</p>
+    <p class="sub">Cole um ou mais links (YouTube, Instagram, Spotify…), um por linha. Do Spotify dá para colar música, álbum ou playlist.</p>
     <div class="card">
-      <textarea id="urls" placeholder="https://www.youtube.com/watch?v=..."></textarea>
+      <textarea id="urls" placeholder="https://www.youtube.com/watch?v=...&#10;https://open.spotify.com/playlist/..."></textarea>
       <div class="row">
         <select id="quality" title="Qualidade do MP3">
           <option value="0">Melhor qualidade (~320 kbps VBR)</option>
           <option value="2">Alta (~190 kbps)</option>
           <option value="5">Média (~130 kbps)</option>
         </select>
-        <label><input type="checkbox" id="playlist"> Baixar playlist inteira</label>
+        <label title="Para playlists do YouTube. Álbuns e playlists do Spotify vêm sempre inteiros."><input type="checkbox" id="playlist"> Baixar playlist inteira do YouTube</label>
         <button class="primary" id="go">Converter</button>
       </div>
     </div>
@@ -243,7 +243,7 @@ async function refresh() {
                     : `${esc(j.status)} · ${Math.round(j.progress)}%`;
         const title = j.title.startsWith("ytsearch1:") ? j.title.slice(10) : j.title;
         return `<div class="job"><div class="title" title="${esc(j.url)}">${esc(title)}</div>
-          <div class="meta"><span></span>${right}</div>
+          <div class="meta"><span>${j.group ? "♫ " + esc(j.group) : ""}</span>${right}</div>
           <div class="bar ${done ? "done" : ""}"><div style="width:${err ? 0 : j.progress}%"></div></div></div>`;
       }).join("");
 

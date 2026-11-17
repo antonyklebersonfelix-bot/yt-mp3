@@ -12,6 +12,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 import zipfile
@@ -25,10 +26,11 @@ except ImportError:
     pass
 
 import recognize
+import spotify
 import updater
 
 APP_NAME = "YT MP3"
-OUT_DIR = Path.home() / "Downloads" / "Musicas"
+OUT_DIR = Path(os.environ.get("YTMP3_OUT") or Path.home() / "Downloads" / "Musicas")
 SUPPORT = Path.home() / "Library" / "Application Support" / "YT-MP3"
 BIN = SUPPORT / "bin"
 YTDLP = BIN / "yt-dlp"
@@ -110,30 +112,122 @@ def update(job_id, **kw):
         jobs[job_id].update(kw)
 
 
-def run_job(job_id, url, quality, playlist):
-    ready.wait()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+slots = threading.Semaphore(3)  # no máximo 3 downloads ao mesmo tempo
+
+
+def ytdlp_cmd(url, quality, out_template, thumbnail=True):
     cmd = [
         str(YTDLP), url,
         "-x", "--audio-format", "mp3", "--audio-quality", quality,
-        "--embed-thumbnail", "--embed-metadata",
+        "--embed-metadata",
         "--ffmpeg-location", FFMPEG,
         "--js-runtimes", f"deno:{DENO}",
         "--newline", "--no-colors",
-        "-o", str(OUT_DIR / "%(title)s.%(ext)s"),
+        "-o", out_template,
         "--print", "before_dl:TITLE:%(title)s",
     ]
-    if not playlist:
-        cmd.append("--no-playlist")
-    update(job_id, status="baixando")
-    for attempt in range(3):  # o YouTube às vezes devolve 403 temporário
-        if not download_once(job_id, cmd) or attempt == 2:
-            break
+    if thumbnail:
+        cmd.append("--embed-thumbnail")
+    return cmd
+
+
+def download_with_retry(job_id, cmd, keep_title=False):
+    """Roda o yt-dlp, tentando de novo em 403 temporário. Retorna True se deu certo."""
+    for attempt in range(3):
+        ok, retry = download_once(job_id, cmd, keep_title)
+        if ok or not retry or attempt == 2:
+            return ok
         update(job_id, status=f"tentando de novo ({attempt + 2}/3)", progress=0, error=None)
+    return False
 
 
-def download_once(job_id, cmd):
-    """Roda o yt-dlp. Retorna True se falhou com 403 (vale tentar de novo)."""
+def run_job(job_id, url, quality, playlist):
+    ready.wait()
+    with slots:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        cmd = ytdlp_cmd(url, quality, str(OUT_DIR / "%(title)s.%(ext)s"))
+        if not playlist:
+            cmd.append("--no-playlist")
+        update(job_id, status="baixando")
+        if download_with_retry(job_id, cmd):
+            update(job_id, status="pronto", progress=100)
+
+
+def safe_name(s):
+    return re.sub(r'[/\\:*?"<>|]+', "-", s).strip(" .")[:150] or "musica"
+
+
+def run_spotify_track(job_id, track, quality):
+    """Música do Spotify: acha no YouTube, baixa e grava nome/artista/capa do Spotify."""
+    ready.wait()
+    with slots:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        final = OUT_DIR / f"{safe_name(track['artist'].split(',')[0])} - {safe_name(track['title'])}.mp3"
+        if final.exists():
+            update(job_id, status="pronto", progress=100, file=final.name + " (já existia)")
+            return
+        update(job_id, status="procurando no YouTube")
+        try:
+            url = spotify.find_on_youtube(track, str(YTDLP), str(DENO))
+        except Exception as e:  # noqa: BLE001
+            update(job_id, status="erro", error=f"Erro na busca: {e}")
+            return
+        if not url:
+            update(job_id, status="erro", error="Não achei essa música no YouTube.")
+            return
+        update(job_id, url=url, status="baixando")
+        with tempfile.TemporaryDirectory(prefix="ytmp3-sp-") as tmpdir:
+            tmp = Path(tmpdir)
+            cmd = ytdlp_cmd(url, quality, str(tmp / "audio.%(ext)s"), thumbnail=False) + ["--no-playlist"]
+            if not download_with_retry(job_id, cmd, keep_title=True):
+                return
+            update(job_id, status="gravando capa e nome")
+            src = tmp / "audio.mp3"
+            cover = None
+            if (cover_url := spotify.track_cover(track)):
+                cover = tmp / "cover.jpg"
+                if subprocess.run(["/usr/bin/curl", "-fsSL", "--max-time", "20", "-o", str(cover), cover_url]).returncode:
+                    cover = None
+            tags = ["-metadata", f"title={track['title']}", "-metadata", f"artist={track['artist']}"]
+            if track.get("album"):
+                tags += ["-metadata", f"album={track['album']}"]
+            out = tmp / "final.mp3"
+            if cover:
+                cmd = [FFMPEG, "-loglevel", "error", "-y", "-i", str(src), "-i", str(cover),
+                       "-map", "0:a", "-map", "1:v", "-c", "copy", "-id3v2_version", "3",
+                       "-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)",
+                       "-disposition:v", "attached_pic", *tags, str(out)]
+            else:
+                cmd = [FFMPEG, "-loglevel", "error", "-y", "-i", str(src), "-map", "0:a", "-c", "copy",
+                       "-id3v2_version", "3", *tags, str(out)]
+            if subprocess.run(cmd).returncode != 0:
+                out = src  # se a etiqueta falhar, fica o áudio mesmo assim
+            shutil.move(str(out), final)
+        update(job_id, status="pronto", progress=100, file=final.name)
+
+
+def add_spotify(holder_id, url, quality):
+    """Lê o link do Spotify e cria um download para cada música."""
+    try:
+        name, tracks = spotify.expand(url)
+    except Exception as e:  # noqa: BLE001
+        update(holder_id, status="erro", error=str(e))
+        return
+    if not tracks:
+        update(holder_id, status="erro", error="Nenhuma música encontrada nesse link.")
+        return
+    with lock:
+        del jobs[holder_id]
+        for t in tracks:
+            jid = uuid.uuid4().hex[:8]
+            jobs[jid] = {"id": jid, "url": url, "title": f"{t['artist']} – {t['title']}",
+                         "status": "na fila", "progress": 0, "file": None, "error": None,
+                         "group": name}
+            threading.Thread(target=run_spotify_track, args=(jid, t, quality), daemon=True).start()
+
+
+def download_once(job_id, cmd, keep_title=False):
+    """Roda o yt-dlp uma vez. Retorna (deu_certo, vale_tentar_de_novo)."""
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         last_lines = []
@@ -141,23 +235,24 @@ def download_once(job_id, cmd):
             line = line.rstrip()
             last_lines = (last_lines + [line])[-5:]
             if line.startswith("TITLE:"):
-                update(job_id, title=line[6:], progress=0, status="baixando")
+                if not keep_title:
+                    update(job_id, title=line[6:])
+                update(job_id, progress=0, status="baixando")
             elif m := PROGRESS_RE.search(line):
                 update(job_id, progress=float(m.group(1)))
             elif "[ExtractAudio]" in line:
                 update(job_id, status="convertendo", progress=100)
-                if d := DEST_RE.search(line):
+                if not keep_title and (d := DEST_RE.search(line)):
                     update(job_id, file=Path(d.group(1)).name)
         proc.wait()
         if proc.returncode == 0:
-            update(job_id, status="pronto", progress=100)
-        else:
-            err = next((l for l in reversed(last_lines) if "ERROR" in l), last_lines[-1] if last_lines else "erro")
-            update(job_id, status="erro", error=err)
-            return "403" in err
+            return True, False
+        err = next((l for l in reversed(last_lines) if "ERROR" in l), last_lines[-1] if last_lines else "erro")
+        update(job_id, status="erro", error=err)
+        return False, "403" in err
     except Exception as e:  # noqa: BLE001
         update(job_id, status="erro", error=str(e))
-    return False
+        return False, False
 
 
 # ---------- descobrir música ----------
@@ -237,10 +332,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not url.startswith(("http://", "https://", "ytsearch1:")):
                     continue
                 job_id = uuid.uuid4().hex[:8]
+                sp = spotify.is_spotify(url)
                 with lock:
-                    jobs[job_id] = {"id": job_id, "url": url, "title": url, "status": "na fila",
+                    jobs[job_id] = {"id": job_id, "url": url, "title": url,
+                                    "status": "lendo o Spotify" if sp else "na fila",
                                     "progress": 0, "file": None, "error": None}
-                threading.Thread(target=run_job, args=(job_id, url, quality, playlist), daemon=True).start()
+                target, args = (add_spotify, (job_id, url, quality)) if sp else (run_job, (job_id, url, quality, playlist))
+                threading.Thread(target=target, args=args, daemon=True).start()
                 created.append(job_id)
             self.send_json({"created": created})
         elif self.path == "/api/find":
