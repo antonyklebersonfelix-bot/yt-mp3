@@ -173,7 +173,11 @@ VINFO_RE = re.compile(r"Stream #\S+: Video: (\w+).*?, (\d{3,5})x(\d{3,5})")
 DUR_RE = re.compile(r"Duration: (\d+):(\d+):([\d.]+)")
 
 
-def to_edit_mp4(job_id):
+HDR_TONEMAP = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,"
+               "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+
+
+def to_edit_mp4(job_id, keep_src=False):
     """Converte o vídeo baixado (VP9/AV1 em mkv) para MP4 H.265 + AAC, que abre no
     Premiere, Final Cut, QuickTime e iPhone. Usa o chip de vídeo do Mac (rápido)."""
     with lock:
@@ -184,15 +188,21 @@ def to_edit_mp4(job_id):
     v, d = VINFO_RE.search(info), DUR_RE.search(info)
     total = (int(d[1]) * 3600 + int(d[2]) * 60 + float(d[3])) if d else 0
     codec, height = (v[1], int(v[3])) if v else ("", 1080)
-    if codec in ("h264", "hevc"):
+    hdr = "arib-std-b67" in info or "smpte2084" in info
+    if codec in ("h264", "hevc") and not hdr:
         video = ["-c:v", "copy"] + (["-tag:v", "hvc1"] if codec == "hevc" else [])
     else:
         rate = 50 if height >= 2160 else 25 if height >= 1440 else 12 if height >= 1080 else 6
         video = ["-c:v", "hevc_videotoolbox", "-b:v", f"{rate}M", "-maxrate", f"{rate * 2}M",
-                 "-pix_fmt", "yuv420p", "-tag:v", "hvc1"]
+                 "-tag:v", "hvc1"]
+        # HDR vira SDR normal (senão fica com cores lavadas no Premiere)
+        video += ["-vf", HDR_TONEMAP, "-color_primaries", "bt709", "-color_trc", "bt709",
+                  "-colorspace", "bt709"] if hdr else ["-pix_fmt", "yuv420p"]
     dst = src.with_suffix(".mp4")
+    if keep_src and dst == src:
+        dst = src.with_name(src.stem + " (Premiere).mp4")
     tmp = src.with_name(src.stem + ".convertendo.mp4")
-    update(job_id, status="convertendo para MP4 (Premiere)", progress=0)
+    update(job_id, status="convertendo para MP4 (Premiere)" + (" – HDR → normal" if hdr else ""), progress=0)
     cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
            "-map", "0:v:0", "-map", "0:a:0?", *video, "-c:a", "aac", "-b:a", "320k",
            "-map_metadata", "0", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(tmp)]
@@ -209,10 +219,26 @@ def to_edit_mp4(job_id):
         update(job_id, status="erro", error="Falhou ao converter para MP4: " + (err.strip().splitlines() or ["?"])[-1])
         return False
     tmp.replace(dst)
-    if dst != src:
+    if dst != src and not keep_src:
         src.unlink(missing_ok=True)
     update(job_id, file=dst.name, path=str(dst))
     return True
+
+
+def run_convert(job_id):
+    with slots:
+        if to_edit_mp4(job_id, keep_src=True):
+            update(job_id, status="pronto", progress=100)
+
+
+PICK_SCRIPT = [
+    "-e", 'set fs to choose file with prompt "Escolha os vídeos para converter para MP4" with multiple selections allowed',
+    "-e", 'set out to ""',
+    "-e", "repeat with f in fs",
+    "-e", "set out to out & POSIX path of f & linefeed",
+    "-e", "end repeat",
+    "-e", "return out",
+]
 
 
 def safe_name(s):
@@ -445,6 +471,18 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/update":
             updater.start_apply()
             self.send_json({"ok": True})
+        elif self.path == "/api/convert":
+            # janela do Mac para escolher os arquivos (o original é mantido)
+            r = subprocess.run(["osascript", *PICK_SCRIPT], capture_output=True, text=True)
+            created = []
+            for f in filter(None, r.stdout.splitlines()):
+                job_id = uuid.uuid4().hex[:8]
+                with lock:
+                    jobs[job_id] = {"id": job_id, "url": f, "title": Path(f).name, "path": f,
+                                    "status": "na fila", "progress": 0, "file": None, "error": None}
+                threading.Thread(target=run_convert, args=(job_id,), daemon=True).start()
+                created.append(job_id)
+            self.send_json({"created": created})
         elif self.path == "/api/open-folder":
             folder = VIDEO_DIR if data.get("video") else OUT_DIR
             folder.mkdir(parents=True, exist_ok=True)

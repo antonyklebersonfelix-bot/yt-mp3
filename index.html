@@ -106,6 +106,7 @@
     <p class="hint" id="qhint"></p>
     <div class="head">
       <h2>Downloads</h2>
+      <button id="convert" title="Escolha um vídeo que já está no Mac (ex.: .mkv) e o app cria uma cópia em MP4 que abre no Premiere">Converter vídeo p/ MP4</button>
       <button id="clear">Limpar concluídos</button>
       <button id="open">Abrir pasta</button>
     </div>
@@ -183,6 +184,7 @@ $("#go").onclick = async () => {
   $("#go").disabled = false;
 };
 $("#updGo").onclick = () => { $("#updGo").disabled = true; post("/api/update"); };
+$("#convert").onclick = () => post("/api/convert", {});
 $("#open").onclick = () => post("/api/open-folder", {video: isVideo()});
 $("#clear").onclick = () => post("/api/clear").then(refresh);
 
