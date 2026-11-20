@@ -38,6 +38,7 @@
   .title { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .meta { font-size:13px; color:var(--muted); display:flex; justify-content:space-between; gap:8px; }
   .err { color:var(--accent); } .done { color:var(--ok); }
+  .hint { font-size:13px; color:var(--muted); margin:8px 2px 0; min-height:1em; }
   .warn { color:#c27c0e; } button.mini { font-size:12px; padding:2px 8px; margin-left:6px; }
   .bar { height:5px; background:var(--line); border-radius:3px; margin-top:6px; overflow:hidden; }
   .bar > div { height:100%; background:var(--accent); transition:width .3s; }
@@ -72,7 +73,7 @@
 <main>
   <h1>YT <span>→</span> MP3</h1>
   <div class="tabs">
-    <button data-tab="dl" class="on">Baixar MP3</button>
+    <button data-tab="dl" class="on">Baixar</button>
     <button data-tab="find">Descobrir música</button>
   </div>
   <div class="update" id="update">
@@ -87,15 +88,22 @@
     <div class="card">
       <textarea id="urls" placeholder="https://www.youtube.com/watch?v=...&#10;https://open.spotify.com/playlist/..."></textarea>
       <div class="row">
-        <select id="quality" title="Qualidade do MP3">
-          <option value="0">Melhor qualidade (~320 kbps VBR)</option>
-          <option value="2">Alta (~190 kbps)</option>
-          <option value="5">Média (~130 kbps)</option>
+        <select id="quality" title="O que baixar">
+          <optgroup label="Música (MP3)">
+            <option value="0">MP3 – melhor qualidade (~320 kbps)</option>
+            <option value="2">MP3 – alta (~190 kbps)</option>
+            <option value="5">MP3 – média (~130 kbps)</option>
+          </optgroup>
+          <optgroup label="Vídeo">
+            <option value="vmax">Vídeo – máxima qualidade (até 4K/8K)</option>
+            <option value="vmp4">Vídeo – compatível (MP4 até 1080p)</option>
+          </optgroup>
         </select>
         <label title="Para playlists do YouTube. Álbuns e playlists do Spotify vêm sempre inteiros."><input type="checkbox" id="playlist"> Baixar playlist inteira do YouTube</label>
-        <button class="primary" id="go">Converter</button>
+        <button class="primary" id="go">Baixar</button>
       </div>
     </div>
+    <p class="hint" id="qhint"></p>
     <div class="head">
       <h2>Downloads</h2>
       <button id="clear">Limpar concluídos</button>
@@ -150,8 +158,20 @@ document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
 try { const t = localStorage.getItem("tab"); if (t) document.querySelector(`.tabs button[data-tab="${t}"]`)?.click(); } catch {}
 
 // baixar
-async function download(urls) {
-  await post("/api/download", {urls, quality:$("#quality").value, playlist:$("#playlist").checked});
+const isVideo = () => $("#quality").value.startsWith("v");
+const HINTS = {
+  vmax: "Maior resolução disponível. Acima de 1080p o vídeo vem em VP9/AV1: abre no VLC e no Chrome, mas pode não abrir no QuickTime ou em aparelhos antigos. Salvo em Downloads/Videos.",
+  vmp4: "MP4 (H.264) até 1080p: abre em qualquer lugar, inclusive iPhone e QuickTime. Salvo em Downloads/Videos.",
+};
+function showHint() {
+  $("#qhint").textContent = HINTS[$("#quality").value] || "";
+  try { localStorage.setItem("quality", $("#quality").value); } catch {}
+}
+try { const q = localStorage.getItem("quality"); if (q && document.querySelector(`#quality option[value="${q}"]`)) $("#quality").value = q; } catch {}
+$("#quality").onchange = showHint; showHint();
+
+async function download(urls, quality) {
+  await post("/api/download", {urls, quality: quality || $("#quality").value, playlist:$("#playlist").checked});
   refresh();
 }
 $("#go").onclick = async () => {
@@ -163,7 +183,7 @@ $("#go").onclick = async () => {
   $("#go").disabled = false;
 };
 $("#updGo").onclick = () => { $("#updGo").disabled = true; post("/api/update"); };
-$("#open").onclick = () => post("/api/open-folder");
+$("#open").onclick = () => post("/api/open-folder", {video: isVideo()});
 $("#clear").onclick = () => post("/api/clear").then(refresh);
 
 // descobrir
@@ -190,7 +210,7 @@ document.addEventListener("click", e => {
   if (b) openUrl(b.dataset.open);
   const d = e.target.closest("[data-dl]");
   if (d) {
-    download(["ytsearch1:" + d.dataset.dl]);
+    download(["ytsearch1:" + d.dataset.dl], "0");
     d.textContent = "✓ Adicionado aos downloads"; d.disabled = true;
   }
 });

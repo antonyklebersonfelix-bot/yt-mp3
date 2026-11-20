@@ -31,6 +31,16 @@ import updater
 
 APP_NAME = "YT MP3"
 OUT_DIR = Path(os.environ.get("YTMP3_OUT") or Path.home() / "Downloads" / "Musicas")
+VIDEO_DIR = Path(os.environ.get("YTMP3_VIDEO_OUT") or Path.home() / "Downloads" / "Videos")
+# "qualidade" escolhida na tela: bitrate do MP3 ou um dos modos de vídeo
+AUDIO_QUALITIES = {"0", "2", "5"}
+VIDEO_MODES = {
+    # maior resolução que existir (4K/8K, geralmente VP9/AV1); mp4 se couber, senão mkv
+    "vmax": ["-f", "bv*+ba/b", "-S", "res,fps,hdr:12", "--merge-output-format", "mp4/mkv"],
+    # H.264 + AAC até 1080p: abre em qualquer lugar (QuickTime, iPhone, TVs)
+    "vmp4": ["-f", "bv*[vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+             "-S", "vcodec:h264,res:1080,acodec:aac", "--merge-output-format", "mp4"],
+}
 SUPPORT = Path.home() / "Library" / "Application Support" / "YT-MP3"
 BIN = SUPPORT / "bin"
 YTDLP = BIN / "yt-dlp"
@@ -116,17 +126,19 @@ slots = threading.Semaphore(3)  # no máximo 3 downloads ao mesmo tempo
 
 
 def ytdlp_cmd(url, quality, out_template, thumbnail=True):
+    media = VIDEO_MODES[quality] if quality in VIDEO_MODES else \
+        ["-x", "--audio-format", "mp3", "--audio-quality", quality]
     cmd = [
-        str(YTDLP), url,
-        "-x", "--audio-format", "mp3", "--audio-quality", quality,
+        str(YTDLP), url, *media,
         "--embed-metadata",
         "--ffmpeg-location", FFMPEG,
         "--js-runtimes", f"deno:{DENO}",
         "--newline", "--no-colors",
         "-o", out_template,
         "--print", "before_dl:TITLE:%(title)s",
+        "--print", "after_move:FILE:%(filepath)s",
     ]
-    if thumbnail:
+    if thumbnail and quality not in VIDEO_MODES:  # capa só no MP3
         cmd.append("--embed-thumbnail")
     return cmd
 
@@ -144,8 +156,9 @@ def download_with_retry(job_id, cmd, keep_title=False):
 def run_job(job_id, url, quality, playlist):
     ready.wait()
     with slots:
-        OUT_DIR.mkdir(parents=True, exist_ok=True)
-        cmd = ytdlp_cmd(url, quality, str(OUT_DIR / "%(title)s.%(ext)s"))
+        folder = VIDEO_DIR if quality in VIDEO_MODES else OUT_DIR
+        folder.mkdir(parents=True, exist_ok=True)
+        cmd = ytdlp_cmd(url, quality, str(folder / "%(title)s.%(ext)s"))
         if not playlist:
             cmd.append("--no-playlist")
         update(job_id, status="baixando")
@@ -242,6 +255,11 @@ def download_once(job_id, cmd, keep_title=False):
                 update(job_id, progress=0, status="baixando")
             elif m := PROGRESS_RE.search(line):
                 update(job_id, progress=float(m.group(1)))
+            elif line.startswith("FILE:"):
+                if not keep_title:
+                    update(job_id, file=Path(line[5:]).name)
+            elif "[Merger]" in line:
+                update(job_id, status="juntando vídeo e áudio", progress=100)
             elif "[ExtractAudio]" in line:
                 update(job_id, status="convertendo", progress=100)
                 if not keep_title and (d := DEST_RE.search(line)):
@@ -314,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/jobs":
             with lock:
                 self.send_json({"jobs": list(jobs.values()), "finds": list(finds.values()),
-                                "outDir": str(OUT_DIR), "setup": dict(setup), "update": updater.snapshot()})
+                                "outDir": str(OUT_DIR), "videoDir": str(VIDEO_DIR), "setup": dict(setup), "update": updater.snapshot()})
         elif self.path == "/api/config":
             self.send_json({"hasAudd": bool(load_config().get("audd_token"))})
         else:
@@ -325,7 +343,7 @@ class Handler(BaseHTTPRequestHandler):
         data = json.loads(self.rfile.read(length) or b"{}")
         if self.path == "/api/download":
             quality = str(data.get("quality", "0"))
-            if quality not in {"0", "2", "5"}:
+            if quality not in AUDIO_QUALITIES and quality not in VIDEO_MODES:
                 quality = "0"
             playlist = bool(data.get("playlist"))
             created = []
@@ -339,7 +357,9 @@ class Handler(BaseHTTPRequestHandler):
                     jobs[job_id] = {"id": job_id, "url": url, "title": url,
                                     "status": "lendo o Spotify" if sp else "na fila",
                                     "progress": 0, "file": None, "error": None}
-                target, args = (add_spotify, (job_id, url, quality)) if sp else (run_job, (job_id, url, quality, playlist))
+                # Spotify é sempre música (MP3)
+                sp_quality = quality if quality in AUDIO_QUALITIES else "0"
+                target, args = (add_spotify, (job_id, url, sp_quality)) if sp else (run_job, (job_id, url, quality, playlist))
                 threading.Thread(target=target, args=args, daemon=True).start()
                 created.append(job_id)
             self.send_json({"created": created})
@@ -376,8 +396,9 @@ class Handler(BaseHTTPRequestHandler):
             updater.start_apply()
             self.send_json({"ok": True})
         elif self.path == "/api/open-folder":
-            OUT_DIR.mkdir(parents=True, exist_ok=True)
-            subprocess.Popen(["open", str(OUT_DIR)])
+            folder = VIDEO_DIR if data.get("video") else OUT_DIR
+            folder.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(["open", str(folder)])
             self.send_json({"ok": True})
         elif self.path == "/api/clear":
             with lock:
