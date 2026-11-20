@@ -95,7 +95,7 @@
             <option value="5">MP3 – média (~130 kbps)</option>
           </optgroup>
           <optgroup label="Vídeo">
-            <option value="vmax">Vídeo – máxima qualidade (até 4K/8K)</option>
+            <option value="vmax">Vídeo – máxima qualidade (até 4K/8K, MP4)</option>
             <option value="vmp4">Vídeo – compatível (MP4 até 1080p)</option>
           </optgroup>
         </select>
@@ -160,7 +160,7 @@ try { const t = localStorage.getItem("tab"); if (t) document.querySelector(`.tab
 // baixar
 const isVideo = () => $("#quality").value.startsWith("v");
 const HINTS = {
-  vmax: "Maior resolução disponível. Acima de 1080p o vídeo vem em VP9/AV1: abre no VLC e no Chrome, mas pode não abrir no QuickTime ou em aparelhos antigos. Salvo em Downloads/Videos.",
+  vmax: "Maior resolução disponível (até 4K/8K). Sai em MP4 (H.265) que abre no Premiere, Final Cut, QuickTime e iPhone. Depois de baixar, o app converte o vídeo: leva mais ou menos o tempo do próprio vídeo. Salvo em Downloads/Videos.",
   vmp4: "MP4 (H.264) até 1080p: abre em qualquer lugar, inclusive iPhone e QuickTime. Salvo em Downloads/Videos.",
 };
 function showHint() {

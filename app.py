@@ -35,8 +35,9 @@ VIDEO_DIR = Path(os.environ.get("YTMP3_VIDEO_OUT") or Path.home() / "Downloads" 
 # "qualidade" escolhida na tela: bitrate do MP3 ou um dos modos de vídeo
 AUDIO_QUALITIES = {"0", "2", "5"}
 VIDEO_MODES = {
-    # maior resolução que existir (4K/8K, geralmente VP9/AV1); mp4 se couber, senão mkv
-    "vmax": ["-f", "bv*+ba/b", "-S", "res,fps,hdr:12", "--merge-output-format", "mp4/mkv"],
+    # maior resolução que existir (4K/8K). Baixa em SDR, preferindo VP9 a AV1 (decodifica
+    # bem mais rápido); depois to_edit_mp4() converte para MP4 H.265 que o Premiere abre.
+    "vmax": ["-f", "bv*+ba/b", "-S", "res,fps,hdr:sdr,vcodec:vp9", "--merge-output-format", "mkv"],
     # H.264 + AAC até 1080p: abre em qualquer lugar (QuickTime, iPhone, TVs)
     "vmp4": ["-f", "bv*[vcodec^=avc1]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
              "-S", "vcodec:h264,res:1080,acodec:aac", "--merge-output-format", "mp4"],
@@ -163,7 +164,55 @@ def run_job(job_id, url, quality, playlist):
             cmd.append("--no-playlist")
         update(job_id, status="baixando")
         if download_with_retry(job_id, cmd):
+            if quality == "vmax" and not to_edit_mp4(job_id):
+                return
             update(job_id, status="pronto", progress=100)
+
+
+VINFO_RE = re.compile(r"Stream #\S+: Video: (\w+).*?, (\d{3,5})x(\d{3,5})")
+DUR_RE = re.compile(r"Duration: (\d+):(\d+):([\d.]+)")
+
+
+def to_edit_mp4(job_id):
+    """Converte o vídeo baixado (VP9/AV1 em mkv) para MP4 H.265 + AAC, que abre no
+    Premiere, Final Cut, QuickTime e iPhone. Usa o chip de vídeo do Mac (rápido)."""
+    with lock:
+        src = Path(jobs[job_id].get("path") or "")
+    if not src.exists():
+        return True  # nada para converter (ex.: já existia)
+    info = subprocess.run([FFMPEG, "-hide_banner", "-i", str(src)], capture_output=True, text=True).stderr
+    v, d = VINFO_RE.search(info), DUR_RE.search(info)
+    total = (int(d[1]) * 3600 + int(d[2]) * 60 + float(d[3])) if d else 0
+    codec, height = (v[1], int(v[3])) if v else ("", 1080)
+    if codec in ("h264", "hevc"):
+        video = ["-c:v", "copy"] + (["-tag:v", "hvc1"] if codec == "hevc" else [])
+    else:
+        rate = 50 if height >= 2160 else 25 if height >= 1440 else 12 if height >= 1080 else 6
+        video = ["-c:v", "hevc_videotoolbox", "-b:v", f"{rate}M", "-maxrate", f"{rate * 2}M",
+                 "-pix_fmt", "yuv420p", "-tag:v", "hvc1"]
+    dst = src.with_suffix(".mp4")
+    tmp = src.with_name(src.stem + ".convertendo.mp4")
+    update(job_id, status="convertendo para MP4 (Premiere)", progress=0)
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+           "-map", "0:v:0", "-map", "0:a:0?", *video, "-c:a", "aac", "-b:a", "320k",
+           "-map_metadata", "0", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(tmp)]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for line in proc.stdout:
+        if line.startswith("out_time_us=") and total:
+            try:
+                update(job_id, progress=min(99.0, int(line.split("=")[1]) / 1e6 / total * 100))
+            except ValueError:
+                pass
+    err = proc.stderr.read()
+    if proc.wait() != 0 or not tmp.exists():
+        tmp.unlink(missing_ok=True)
+        update(job_id, status="erro", error="Falhou ao converter para MP4: " + (err.strip().splitlines() or ["?"])[-1])
+        return False
+    tmp.replace(dst)
+    if dst != src:
+        src.unlink(missing_ok=True)
+    update(job_id, file=dst.name, path=str(dst))
+    return True
 
 
 def safe_name(s):
@@ -256,6 +305,7 @@ def download_once(job_id, cmd, keep_title=False):
             elif m := PROGRESS_RE.search(line):
                 update(job_id, progress=float(m.group(1)))
             elif line.startswith("FILE:"):
+                update(job_id, path=line[5:])
                 if not keep_title:
                     update(job_id, file=Path(line[5:]).name)
             elif "[Merger]" in line:
